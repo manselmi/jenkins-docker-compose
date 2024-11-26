@@ -1,7 +1,7 @@
 # derived from:
 #   https://github.com/jenkinsci/docker-agent
 
-FROM quay.io/pypa/manylinux_2_28_aarch64:latest
+FROM quay.io/pypa/manylinux_2_28_aarch64:2024-11-24-a3012f3
 LABEL maintainer="Mike Anselmi <git@manselmi.com>"
 
 # Define TLS-related environment variables.
@@ -19,7 +19,7 @@ COPY ["resources/tls-ca-bundle.pem", "/usr/share/pki/ca-trust-source/anchors/tls
 RUN update-ca-trust extract
 
 # Configure Jenkins agent (suitable for Jenkins Docker plugin).
-ARG remoting_version=3261.v9c670a_4748a_9
+ARG remoting_version=3283.v92c105e0f819
 ARG gid=1000
 ARG group=jenkins
 ARG uid=1000

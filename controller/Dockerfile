@@ -1,4 +1,4 @@
-FROM docker.io/jenkins/jenkins:2.480-rhel-ubi9-jdk21
+FROM docker.io/jenkins/jenkins:2.486-rhel-ubi9-jdk21
 LABEL maintainer="Mike Anselmi <git@manselmi.com>"
 
 # Define TLS-related environment variables.
