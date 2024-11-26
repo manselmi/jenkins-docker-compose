@@ -1,0 +1,56 @@
+# vim: set ft=yaml :
+
+
+networks:
+
+  jenkins:
+    driver: 'bridge'
+
+services:
+
+  controller:
+    container_name: 'jenkins-controller'
+    environment:
+      JAVA_OPTS: '-Djenkins.install.runSetupWizard=false'
+      JENKINS_URL: 'http://localhost:4080/'
+      JENKINS_USERNAME: '${JENKINS_USERNAME}'
+      JENKINS_PASSWORD: '${JENKINS_PASSWORD}'
+    image: 'jenkins-controller:latest'
+    networks:
+      - 'jenkins'
+    ports:
+      - mode: 'host'
+        protocol: 'tcp'
+        published: 4080
+        target: 8080
+    stop_signal: 'SIGINT'
+    user: 'root'
+    volumes:
+      - source: 'controller'
+        target: '/var/jenkins_home'
+        type: 'volume'
+      - source: '/var/run/docker.sock'
+        target: '/var/run/docker.sock'
+        type: 'bind'
+
+  manylinux_2_28_aarch64:
+    depends_on:
+      - 'controller'
+    entrypoint:
+      - 'jenkins-agent-auto'
+    environment:
+      JENKINS_AGENT_LABEL: 'manylinux_2_28_aarch64'
+      JENKINS_AGENT_NUM_EXECUTORS: '1'
+      JENKINS_URL: 'http://controller:8080/'
+      JENKINS_USERNAME: '${JENKINS_USERNAME}'
+      JENKINS_PASSWORD: '${JENKINS_PASSWORD}'
+    image: 'jenkins-agent-manylinux_2_28_aarch64:latest'
+    networks:
+      - 'jenkins'
+    restart: 'always'
+
+volumes:
+
+  controller:
+    driver: 'local'
+    name: 'jenkins-controller'

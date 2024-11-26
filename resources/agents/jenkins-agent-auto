@@ -1,0 +1,180 @@
+#!/venv/jenkins-agent-auto/bin/python -u
+# vim: set ft=python :
+
+import functools
+import os
+import platform
+import signal
+import ssl
+import subprocess
+import sys
+import tempfile
+from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
+
+from bs4 import BeautifulSoup
+from httpx import Client, ConnectError, ConnectTimeout, HTTPStatusError, URL
+from jenkins import LAUNCHER_JNLP, Jenkins
+from stamina import retry_context as retry_context_
+
+JENKINS_AGENT_STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+print = functools.partial(print, file=sys.stderr)
+
+
+class RetryableHTTPStatusError(Exception):
+    pass
+
+
+def client_factory_(auth):
+    def raise_for_status(response):
+        try:
+            response.raise_for_status()
+        except HTTPStatusError as exc:
+            if response.status_code in {429, 502, 503, 504}:
+                raise RetryableHTTPStatusError from exc
+            raise
+
+    return Client(
+        auth=auth,
+        event_hooks={"response": [raise_for_status]},
+        http2=True,
+        verify=ssl.create_default_context(cafile=os.environ.get("TLS_CA_BUNDLE_PEM")),
+    )
+
+
+def get_content(client, url, **kwargs):
+    return client.get(url, **kwargs).content
+
+
+def unregister_agent(jenkins, name):
+    print(f"unregistering agent {name}…")
+    if jenkins.node_exists(name):
+        jenkins.delete_node(name)
+        print(f"unregistered agent {name}")
+    else:
+        print(f"unknown agent {name}")
+
+
+def register_agent(jenkins, *, name, label, num_executors, root_dir):
+    print(f"registering agent {name}…")
+    jenkins.create_node(
+        name=name,
+        labels=label,
+        launcher=LAUNCHER_JNLP,
+        numExecutors=num_executors,
+        remoteFS=root_dir,
+    )
+    print(f"registered agent {name}")
+
+
+def set_signal_handler(handler, signals):
+    for signal_ in signals:
+        signal.signal(signal_, handler)
+
+
+def main(args):
+    client_factory = functools.partial(client_factory_, (args.username, args.password))
+
+    retry_context = functools.partial(
+        retry_context_,
+        on=(ConnectError, ConnectTimeout, RetryableHTTPStatusError),
+        timeout=120,
+        wait_initial=0.25,
+    )
+
+    print("waiting until controller is ready…")
+    with client_factory() as client:
+        for attempt in retry_context():
+            with attempt:
+                client.head(URL.join(args.url, "login"))
+    print("controller is ready")
+
+    print("getting Jenkins instance…")
+    jenkins = Jenkins(args.url, username=args.username, password=args.password)
+    print("got Jenkins instance")
+
+    agent_name = "-".join([args.label, platform.node().split(".", maxsplit=1)[0]])
+    unregister_agent(jenkins, agent_name)
+    try:
+        register_agent(
+            jenkins,
+            name=agent_name,
+            label=args.label,
+            num_executors=args.num_executors,
+            root_dir=args.workdir,
+        )
+
+        with client_factory() as client:
+            jar_url = URL.join(args.url, "jnlpJars/remoting.jar")
+            print("fetching agent JAR…")
+            for attempt in retry_context():
+                with attempt:
+                    jar = get_content(client, jar_url)
+            print("fetched agent JAR")
+
+            agent_jnlp_url = URL.join(args.url, f"computer/{agent_name}/jenkins-agent.jnlp")
+            print("fetching agent JNLP…")
+            for attempt in retry_context():
+                with attempt:
+                    agent_jnlp = get_content(client, agent_jnlp_url)
+            print(f'fetched agent JNLP: {agent_jnlp.decode("ascii", errors="replace")}')
+
+        print("parsing agent JNLP…")
+        xml = BeautifulSoup(agent_jnlp, "lxml-xml")
+        print("parsed agent JNLP")
+
+        print("extracting agent JNLP secret…")
+        secret = xml.find("argument").text
+        print(f"extracted agent JNLP secret: {secret}")
+
+        print("starting agent JAR subprocess…")
+        with tempfile.NamedTemporaryFile(mode="wb") as temp_file:
+            temp_file.write(jar)
+            temp_file.flush()
+            process = subprocess.Popen(
+                [
+                    "java",
+                    "-jar",
+                    temp_file.name,
+                    "-url",
+                    args.url,
+                    "-name",
+                    agent_name,
+                    "-secret",
+                    secret,
+                    "-workDir",
+                    args.workdir,
+                ],
+                preexec_fn=functools.partial(
+                    set_signal_handler, signal.SIG_DFL, JENKINS_AGENT_STOP_SIGNALS
+                ),
+                restore_signals=False,
+            )
+
+            def signal_handler(signal_num, frame):
+                signal_name = signal.Signals(signal_num).name
+                print(f"caught {signal_name}")
+                print(f"sending {signal_name} to agent JAR subprocess…")
+                process.send_signal(signal_num)
+                print(f"sent {signal_name} to agent JAR subprocess")
+
+            set_signal_handler(signal_handler, JENKINS_AGENT_STOP_SIGNALS)
+            process.wait()
+        print(f"agent JAR subprocess exited with returncode {process.returncode}")
+    finally:
+        unregister_agent(jenkins, agent_name)
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--url", default=os.environ["JENKINS_URL"])
+    parser.add_argument("--username", default=os.environ["JENKINS_USERNAME"])
+    parser.add_argument("--password", default=os.environ["JENKINS_PASSWORD"])
+    parser.add_argument("--label", default=os.environ["JENKINS_AGENT_LABEL"])
+    parser.add_argument(
+        "--num-executors", default=int(os.environ.get("JENKINS_AGENT_NUM_EXECUTORS", 1)), type=int
+    )
+    parser.add_argument("--workdir", default=os.environ["JENKINS_AGENT_WORKDIR"])
+
+    main(parser.parse_args())
